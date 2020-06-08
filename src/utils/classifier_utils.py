@@ -2,6 +2,7 @@ import os
 import sys
 import csv
 import logging
+import pandas as pd
 
 from scipy.stats import pearsonr, spearmanr
 
@@ -70,7 +71,107 @@ class DataProcessor(object):
                 lines.append(line)
             return lines
 
+class KorTDTestProcessor(DataProcessor):
+    def get_train_examples(self, data_dir):
+        news_title_path = os.path.join(data_dir, 'news_title', 'train.news_title.txt')
+        with open(news_title_path, 'r', encoding='utf-8-sig') as f:
+            titles = f.readlines()
+        return self._create_examples(
+            self._read_csv(os.path.join(data_dir, 'labeled','train.tsv')),
+            titles,
+            "train")
 
+
+
+    def get_dev_examples(self, data_dir):
+        news_title_path = os.path.join(data_dir, 'news_title', 'dev.news_title.txt')
+        with open(news_title_path, 'r', encoding='utf-8-sig') as f:
+            titles = f.readlines()
+
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, 'labeled', 'dev.tsv')),
+            titles,
+            "dev"
+        )
+
+    def get_test_examples(self, data_dir):
+        news_title_path = os.path.join(data_dir, 'news_title', 'test.news_title.txt')
+        with open(news_title_path, 'r', encoding='utf-8-sig') as f:
+            titles = f.readlines()
+
+        csv = pd.read_csv(os.path.join(data_dir, 'labeled', 'test.gender_bias.no_label.csv')).values
+        return self._create_examples(
+            csv,
+            titles,
+            "test"
+        )
+
+    def get_labels(self):
+        return [['True','False'],['gender','others','none'],['hate','offensive','none']]
+
+    def _create_examples(self, lines, titles, set_type):
+        examples = []
+        lines = lines[:,0]
+        for line, title in zip(lines, titles):
+            guid = "%s-%s" % (set_type, line)
+            text_a = line
+            text_b = title.strip()
+            label_gender_bias = 'False'
+            label_bias = 'none'
+            label_hate = 'none'
+            label = [label_gender_bias, label_bias, label_hate]
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        return examples
+
+class KorTDProcessor(DataProcessor):
+    def get_train_examples(self, data_dir):
+        news_title_path = os.path.join(data_dir, 'news_title', 'train.news_title.txt')
+        with open(news_title_path, 'r', encoding='utf-8-sig') as f:
+            titles = f.readlines()
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, 'labeled','train.tsv')),
+            titles,
+            "train")
+
+    def get_dev_examples(self, data_dir):
+        news_title_path = os.path.join(data_dir, 'news_title', 'dev.news_title.txt')
+        with open(news_title_path, 'r', encoding='utf-8-sig') as f:
+            titles = f.readlines()
+
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, 'labeled', 'dev.tsv')),
+            titles,
+            "dev"
+        )
+
+    def get_test_examples(self, data_dir):
+        news_title_path = os.path.join(data_dir, 'news_title', 'test.news_title.txt')
+        with open(news_title_path, 'r', encoding='utf-8-sig') as f:
+            titles = f.readlines()
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, 'labeled', 'test.tsv')),
+            titles,
+            "test"
+        )
+
+    def get_labels(self):
+        return [['True','False'],['gender','others','none'],['hate','offensive','none']]
+
+    def _create_examples(self, lines, titles, set_type):
+        examples = []
+        lines = lines[1:]
+        for line, title in zip(lines, titles):
+            guid = "%s-%s" % (set_type, line[0])
+            text_a = line[0]
+            text_b = title.strip()
+            label_gender_bias = line[1]
+            label_bias = line[2]
+            label_hate = line[3]
+            label = [label_gender_bias, label_bias, label_hate]
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        return examples
 class KorNLIProcessor(DataProcessor):
     """Processor for the KorNLI data set."""
 
@@ -151,7 +252,18 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
                                  tokenizer, output_mode):
     """Loads a data file into a list of `InputBatch`s."""
 
-    label_map = {label : i for i, label in enumerate(label_list)}
+    label_map0 = {}
+    label_map1 = {}
+    label_map2 = {}
+    if output_mode == "classification_multitask":
+        for i, label in enumerate(label_list[0]):
+            label_map0[label]=i
+        for i, label in enumerate(label_list[1]):
+            label_map1[label] = i
+        for i, label in enumerate(label_list[2]):
+            label_map2[label] = i
+
+    else: label_map = {label : i for i, label in enumerate(label_list)}
 
     features = []
     for (ex_index, example) in enumerate(examples):
@@ -213,7 +325,9 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
 
-        if output_mode == "classification":
+        if output_mode == "classification_multitask":
+            label_id = [label_map0[example.label[0]], label_map1[example.label[1]], label_map2[example.label[2]]]
+        elif output_mode == "classification":
             label_id = label_map[example.label]
         elif output_mode == "regression":
             label_id = float(example.label)
@@ -229,7 +343,12 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
             logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
             logger.info(
                 "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label_id))
+
+            if output_mode == "classification_multitask":
+                logger.info("label: {}, {}, {}, (id={}, {}, {})".format(
+                    example.label[0], example.label[1], example.label[2], label_id[0], label_id[1], label_id[2]))
+            else:
+                logger.info("label: %s (id = %d)" % (example.label, label_id))
 
         features.append(
             InputFeatures(input_ids=input_ids,
@@ -271,10 +390,16 @@ def pearson_and_spearman(preds, labels):
 
 
 def compute_metrics(task_name, preds, labels):
-    assert len(preds) == len(labels)
     if task_name == "kornli":
+        assert len(preds) == len(labels)
         return {"acc": simple_accuracy(preds, labels)}
     elif task_name == "korsts":
+        assert len(preds) == len(labels)
         return pearson_and_spearman(preds, labels)
+    elif task_name == "kortd":
+        assert len(preds[0]) == len(labels)
+        return {"acc0": simple_accuracy(preds[0], labels[:,0]),
+                "acc1": simple_accuracy(preds[1], labels[:,1]),
+                "acc2": simple_accuracy(preds[2], labels[:,2])}
     else:
         raise KeyError(task_name)
