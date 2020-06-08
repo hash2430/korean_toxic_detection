@@ -349,6 +349,35 @@ class Model(nn.Module):
         pooled_output = self.pooler(sequence_output)
         return sequence_output, pooled_output
 
+class SequenceClassificationMultitask(nn.Module):
+    def __init__(self, config, num_labels=[2,3,3]):
+        super(SequenceClassificationMultitask, self).__init__()
+        self.num_labels = num_labels
+        self.bert = Model(config)
+
+        self.dropout = Dropout(config.dropout_prob)
+        self.classifier0 = Linear(config.hidden_size, num_labels[0])
+        self.classifier1 = Linear(config.hidden_size, num_labels[1])
+        self.classifier2 = Linear(config.hidden_size, num_labels[2])
+
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
+        _, pooled_output = self.bert(input_ids, token_type_ids, attention_mask)
+        pooled_output = self.dropout(pooled_output)
+        logits0 = self.classifier0(pooled_output)
+        logits1 = self.classifier1(pooled_output)
+        logits2 = self.classifier2(pooled_output)
+        if labels is not None:
+            loss_fct0 = CrossEntropyLoss()
+            loss_fct1 = CrossEntropyLoss()
+            loss_fct2 = CrossEntropyLoss()
+
+            loss0 = loss_fct0(logits0.view(-1, self.num_labels), labels[:,0].view(-1))
+            loss1 = loss_fct1(logits1.view(-1, self.num_labels), labels[:,1].view(-1))
+            loss2 = loss_fct2(logits2.view(-1, self.num_labels), labels[:,2].view(-1))
+
+            return loss0+loss1+loss2
+        else:
+            return [logits0, logits1, logits2]
 
 class SequenceClassification(nn.Module):
     def __init__(self, config, num_labels=2):

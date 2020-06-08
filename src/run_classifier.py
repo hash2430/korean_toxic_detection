@@ -34,19 +34,21 @@ from tqdm import tqdm, trange
 
 from torch.nn import CrossEntropyLoss, MSELoss
 
-from models.modeling_bert import SequenceClassification, Config
+from models.modeling_bert import SequenceClassificationMultitask, Config, SequenceClassification
 from utils.tokenization import BertTokenizer
 from utils.optimization import AdamW, WarmupLinearSchedule
-from utils.classifier_utils import KorNLIProcessor, KorSTSProcessor, convert_examples_to_features, compute_metrics
+from utils.classifier_utils import KorTDProcessor, KorNLIProcessor, KorSTSProcessor, convert_examples_to_features, compute_metrics
 
 logger = logging.getLogger(__name__)
 
 processors = {
+    "kortd": KorTDProcessor,
     "kornli": KorNLIProcessor,
     "korsts": KorSTSProcessor
 }
 
 output_modes = {
+    "kortd": "classification_multitask",
     "kornli": "classification",
     "korsts": "regression"
 }
@@ -201,8 +203,16 @@ def main():
 
     # Prepare model
     config = Config(args.config_file)
-    model = SequenceClassification(config, num_labels=num_labels)
+    #
+    if output_mode == "classification":
+        model = SequenceClassification(config, num_labels=num_labels)
+    elif output_mode == "classification_multitask":
+        model = SequenceClassificationMultitask(config)
     model.bert.load_state_dict(torch.load(args.checkpoint))
+
+    # Do not fine-tune BERT parameters
+    # for param in model.bert.parameters():
+    #     param.requires_grad = False
     num_params = count_parameters(model)
     logger.info("Total Parameter: %d" % num_params)
     model.to(device)
@@ -218,7 +228,10 @@ def main():
     all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
 
-    if output_mode == "classification":
+    if output_mode == "classification_multitask":
+        all_label_ids = all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
+        num_labels = [2, 3, 3]
+    elif output_mode == "classification":
         all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
     elif output_mode == "regression":
         all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.float)
@@ -275,8 +288,16 @@ def main():
 
             # define a new function to compute loss values for both output_modes
             logits = model(input_ids, segment_ids, input_mask, labels=None)
+            if output_mode == "classification_multitask":
+                loss_fct0 = CrossEntropyLoss()
+                loss_fct1 = CrossEntropyLoss()
+                loss_fct2 = CrossEntropyLoss()
 
-            if output_mode == "classification":
+                loss0 = loss_fct0(logits[0].view(-1, num_labels[0]), label_ids[:, 0].view(-1))
+                loss1 = loss_fct1(logits[1].view(-1, num_labels[1]), label_ids[:, 1].view(-1))
+                loss2 = loss_fct2(logits[2].view(-1, num_labels[2]), label_ids[:, 2].view(-1))
+                loss = loss0+loss1+loss2
+            elif output_mode == "classification":
                 loss_fct = CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
             elif output_mode == "regression":
@@ -330,7 +351,9 @@ def main():
             all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
             all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
 
-            if output_mode == "classification":
+            if output_mode == "classification_multitask":
+                all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+            elif output_mode == "classification":
                 all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
             elif output_mode == "regression":
                 all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
@@ -344,6 +367,9 @@ def main():
             eval_loss = 0
             nb_eval_steps = 0
             preds = []
+            preds0 = []
+            preds1 = []
+            preds2 = []
 
             for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
                 input_ids = input_ids.to(device)
@@ -355,7 +381,16 @@ def main():
                     logits = model(input_ids, segment_ids, input_mask, labels=None)
 
                 # create eval loss and other metric required by the task
-                if output_mode == "classification":
+                if output_mode == "classification_multitask":
+                    loss_fct0 = CrossEntropyLoss()
+                    loss_fct1 = CrossEntropyLoss()
+                    loss_fct2 = CrossEntropyLoss()
+
+                    loss0 = loss_fct0(logits[0].view(-1, num_labels[0]), label_ids[:, 0].view(-1))
+                    loss1 = loss_fct1(logits[1].view(-1, num_labels[1]), label_ids[:, 1].view(-1))
+                    loss2 = loss_fct2(logits[2].view(-1, num_labels[2]), label_ids[:, 2].view(-1))
+                    tmp_eval_loss = loss0 + loss1 + loss2
+                elif output_mode == "classification":
                     loss_fct = CrossEntropyLoss()
                     tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
                 elif output_mode == "regression":
@@ -364,17 +399,39 @@ def main():
 
                 eval_loss += tmp_eval_loss.mean().item()
                 nb_eval_steps += 1
-                if len(preds) == 0:
-                    preds.append(logits.detach().cpu().numpy())
+
+                if output_mode == "classification_multitask":
+                    if len(preds0) == 0:
+                        preds0.append(logits[0].detach().cpu().numpy())
+                        preds1.append(logits[1].detach().cpu().numpy())
+                        preds2.append(logits[2].detach().cpu().numpy())
+                    else:
+                        preds0[0] = np.append(preds0[0], logits[0].detach().cpu().numpy(), axis=0)
+                        preds1[0] = np.append(preds1[0], logits[1].detach().cpu().numpy(), axis=0)
+                        preds2[0] = np.append(preds2[0], logits[2].detach().cpu().numpy(), axis=0)
                 else:
-                    preds[0] = np.append(
-                        preds[0], logits.detach().cpu().numpy(), axis=0)
+                    if len(preds) == 0:
+                        preds.append(logits.detach().cpu().numpy())
+                    else:
+                        preds[0] = np.append(
+                            preds[0], logits.detach().cpu().numpy(), axis=0)
 
             eval_loss = eval_loss / nb_eval_steps
-            preds = preds[0]
-            if output_mode == "classification":
+
+            if output_mode == "classification_multitask":
+                preds0 = preds0[0]
+                preds1 = preds1[0]
+                preds2 = preds2[0]
+
+                preds0 = np.argmax(preds0, axis=1)
+                preds1 = np.argmax(preds1, axis=1)
+                preds2 = np.argmax(preds2, axis=1)
+                preds = [preds0, preds1, preds2]
+            elif output_mode == "classification":
+                preds = preds[0]
                 preds = np.argmax(preds, axis=1)
             elif output_mode == "regression":
+                preds = preds[0]
                 preds = np.squeeze(preds)
             result = compute_metrics(task_name, preds, all_label_ids.numpy())
             loss = tr_loss/global_step
