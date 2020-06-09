@@ -219,11 +219,11 @@ def main():
         #         label.append('none')
         for p in preds2:
             if p==0:
-                label.append('hate')
+                label.append('2')
             elif p==1:
-                label.append('offensive')
+                label.append('1')
             else:
-                label.append('none')
+                label.append('0')
     elif output_mode == "classification":
         preds = preds[0]
         preds = np.argmax(preds, axis=1)
@@ -236,7 +236,7 @@ def main():
     data = {'comments':texts,
             'label':label}
     data_df = DataFrame(data)
-    csv_write_path='/mnt/sdc1/korLM/by_me/out/by_me_9_hate_0608.csv'
+    csv_write_path='out/by_me_9_hate_0608.csv'
     # data_df.to_csv(csv_write_path, sep=',',index=False)
     with open(csv_write_path, 'w', encoding='utf-8') as f:
         wr = csv.writer(f)
