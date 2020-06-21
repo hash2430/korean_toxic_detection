@@ -2,38 +2,45 @@ import os
 from typing import List, Union
 import pickle
 import random
-
+import argparse
 import torch
 from torch.utils.data import IterableDataset
-
+from models.modeling_bert import Model, Config, MlmNspModel
 ### You can import any Python standard libraries or pyTorch sub directories here
 from torch.utils.data import DataLoader
-device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:3' if torch.cuda.is_available() else 'cpu')
 ### END YOUR LIBRARIES
 
-import utils
-
+import utils_pretrain
+from utils.tokenization import BertTokenizer
 from bpe import BytePairEncoding
 from model import MLMandNSPmodel
 from data import ParagraphDataset
-
+print(torch.cuda.is_available())
 # You can use tqdm to check your progress
 from tqdm import tqdm, trange
 
+# TODO: 2 data path designation
 class PretrainDataset(IterableDataset):
-    def __init__(self, dataset: ParagraphDataset):
+    def __init__(self, max_seq_len, comment_dataset: ParagraphDataset, title_dataset: ParagraphDataset, tokenizer: BertTokenizer):
         """ Maked Language Modeling & Next Sentence Prediction dataset initializer
         Use below attributes when implementing the dataset
 
         Attributes:
         dataset -- Paragraph dataset to make a MLM & NSP sample
         """
-        self.dataset = dataset
+        self.comment_dataset = comment_dataset
+        self.title_dataset = title_dataset
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+
+
 
     @property
     def token_num(self):
-        return self.dataset.token_num
+        return self.comment_dataset.token_num
 
+    # TODO: nsp pair sample/example create/feature create(=tokenize)
     def __iter__(self):
         """ Masked Language Modeling & Next Sentence Prediction dataset
         Sample two sentences from the dataset, and make a self-supervised pretraining sample for MLM & NSP
@@ -56,9 +63,9 @@ class PretrainDataset(IterableDataset):
         NSP_label = True
         """
         # Special tokens
-        CLS = BytePairEncoding.CLS_token_idx
-        SEP = BytePairEncoding.SEP_token_idx
-        MSK = BytePairEncoding.MSK_token_idx
+        CLS = 2
+        SEP = 3
+        MSK = 4
 
         # The number of tokens
         TOKEN_NUM = self.token_num
@@ -72,52 +79,34 @@ class PretrainDataset(IterableDataset):
             source_sentences = []
             MLM_mask = []
 
+            # SAMPLE NSP PAIR
             nsp = torch.multinomial(torch.FloatTensor([0.5, 0.5]), 1)
 
-            # pick two paragraphs
-            p_indices = random.sample(range(len(self.dataset)), 2)
-            # pick one sentence per each paragraph
-
-            if nsp == torch.FloatTensor([1.]):
+            index = random.randint(0, len(self.comment_dataset)-1)
+            if nsp == torch.LongTensor([1]):
                 NSP_label = True
-                while len(self.dataset[p_indices[0]]) < 2:
-                    p_indices[0] = random.randint(0, len(self.dataset)-1)
-                sentence1 = random.randint(0, len(self.dataset[p_indices[0]]) - 2)
-                sentence2 = sentence1 + 1
-                prgr = [self.dataset[p_indices[0]][sentence1], self.dataset[p_indices[0]][sentence2]]
+                sentence1 = self.comment_dataset[index]
+                sentence2 = self.title_dataset[index]
             else:
                 NSP_label = False
+                title_index = random.randint(0, len(self.comment_dataset)-1)
+                while index == title_index:
+                    title_index = random.randint(0, len(self.comment_dataset) - 1)
+                sentence1 = self.comment_dataset[index]
+                sentence2 = self.title_dataset[title_index]
+            prgr = [sentence1, sentence2]
 
-                if len(self.dataset[p_indices[0]]) < 2:
-                    sentence1_idx = 0
-                    sentence1 = self.dataset[p_indices[0]][sentence1_idx]
-
-                    sentence2_idx = random.randint(0, len(self.dataset[p_indices[1]])-1)
-                    sentence2 = self.dataset[p_indices[1]][sentence2_idx]
-                else:
-                    sentence1_idx = random.randint(0, len(self.dataset[p_indices[0]]) - 1)
-                    sentence1 = self.dataset[p_indices[0]][sentence1_idx]
-                    if sentence1_idx == len(self.dataset[p_indices[0]])-1:
-                        sentence2 = random.randint(0, len(self.dataset[p_indices[1]]) - 1)
-                        sentence2 = self.dataset[p_indices[1]][sentence2]
-                    else:
-                        not_sentence2 = self.dataset[p_indices[0]][sentence1_idx+1]
-                        sentence2 = random.randint(0, len(self.dataset[p_indices[1]]) - 1)
-                        sentence2 = self.dataset[p_indices[1]][sentence2]
-
-                        while sentence2 == not_sentence2:
-                            # paragraph_idx = random.randint(0, len(self.dataset)-1)
-                            sentence_idx = random.randint(0, len(self.dataset[p_indices[1]])-1)
-                            sentence2 = self.dataset[p_indices[1]][sentence_idx]
-
-                prgr = [sentence1, sentence2]
-
+            # GENERATE EXAMPLE, TOKENIZE, MASK
             i = 0
-            src_sentence = [CLS]
+            src_sentence = ['[CLS]']
             for sentence in prgr:
-                src_sentence += sentence
+                src_sentence += self.tokenizer.tokenize(sentence)
                 i += len(sentence)
-                src_sentence += [SEP]
+                src_sentence += ['[SEP]']
+            src_sentence = self.tokenizer.convert_tokens_to_ids(src_sentence)
+            if len(src_sentence) > self.max_seq_len:
+                src_sentence = src_sentence[:self.max_seq_len-1]
+                src_sentence.append(SEP)
             uniform_prob = 1.0/float(i)
             mask = torch.FloatTensor(src_sentence) == SEP
             mask2 = torch.FloatTensor(src_sentence) == CLS
@@ -125,7 +114,6 @@ class PretrainDataset(IterableDataset):
             distribution = torch.FloatTensor(src_sentence)
             distribution[mask] = 0.
             distribution[~mask] = uniform_prob
-            m = torch.distributions.categorical.Categorical(distribution)
             sample_num = int(len(src_sentence)*0.15)
             try:
                 sampled_indices = torch.multinomial(distribution, sample_num, False)
@@ -133,8 +121,8 @@ class PretrainDataset(IterableDataset):
                 n_do_nothing = int(float(sample_num) * 0.1)
                 mask_indices = sampled_indices[:n_mask]
                 random_transform_indices = sampled_indices[n_mask + n_do_nothing:]
-                random_tokens = random.sample(range(5, self.dataset.token_num), len(random_transform_indices))
-            except:
+                random_tokens = random.sample(range(8, len(self.tokenizer.vocab)), len(random_transform_indices))
+            except: #Exception occurs when the length of src_sentence is too short. If that's the case, I am masking one token.
                 sampled_indices = [random.randint(1, len(src_sentence) - 2)]
                 mask_indices = sampled_indices
                 random_transform_indices = []
@@ -149,7 +137,7 @@ class PretrainDataset(IterableDataset):
                 mlm_sentence[mask_indices] = MSK
                 for idx, random_token in zip(random_transform_indices, random_tokens):
                     while mlm_sentence[idx] == random_token:
-                        random_token = random.randint(5, self.dataset.token_num)
+                        random_token = random.randint(8, len(self.tokenizer.vocab))
                     mlm_sentence[idx] = random_token
 
 
@@ -162,7 +150,7 @@ class PretrainDataset(IterableDataset):
             yield source_sentences, MLM_sentences, MLM_mask, NSP_label
 
 def calculate_losses(
-    model: MLMandNSPmodel,
+    model: MlmNspModel,
     source_sentences: torch.Tensor,
     MLM_sentences: torch.Tensor,
     MLM_mask: torch.Tensor,
@@ -198,16 +186,18 @@ def calculate_losses(
     masked_indices = masked_indices.squeeze(1)
 
     # MLM
-    mlm_out, nsp_out = model(MLM_sentences)
+    mlm_out, nsp_out = model(MLM_sentences, None)
     predicted = mlm_out.view(mlm_out.shape[0]*mlm_out.shape[1],-1).index_select(0, masked_indices)
     gt = source_sentences.flatten().index_select(0, masked_indices)
 
     ce_MLM = torch.nn.CrossEntropyLoss()
+    #TODO: convert predicted to e
     MLM_loss = ce_MLM(predicted, gt)
 
     # NSP
     ce_NSP = torch.nn.CrossEntropyLoss()
-    nsp_label = torch.stack([torch.LongTensor([0]) for i in range(NSP_label.shape[0])])
+    NSP_label.contiguous()
+    nsp_label = torch.zeros(NSP_label.shape[0], dtype=torch.int64)
     for i in range(NSP_label.shape[0]):
         if NSP_label[i]:
             nsp_label[i]=torch.LongTensor([1])
@@ -289,9 +279,9 @@ def pretraining(
     NSP_train_losses = []
     NSP_val_losses = []
     train_data_iterator = iter(
-        torch.utils.data.dataloader.DataLoader(train_dataset, batch_size=batch_size, num_workers=2, shuffle=False))
+        torch.utils.data.dataloader.DataLoader(train_dataset, collate_fn=utils_pretrain.pretrain_collate_fn, batch_size=batch_size, num_workers=16, shuffle=False))
     eval_data_iterator = iter(
-        torch.utils.data.dataloader.DataLoader(val_dataset, batch_size=batch_size, num_workers=2, shuffle=False))
+        torch.utils.data.dataloader.DataLoader(val_dataset, collate_fn=utils_pretrain.pretrain_collate_fn, batch_size=batch_size, num_workers=16, shuffle=False))
 
     loss_log = tqdm(total=0, bar_format='{desc}')
     i = 0
@@ -301,9 +291,14 @@ def pretraining(
         MLM_loss = 0
         NSP_loss = 0
         model.train()
+        device = 'cpu'
         for step in trange(steps_per_a_epoch, desc="Training steps"):
             optimizer.zero_grad()
             src, mlm, mask, nsp = next(train_data_iterator)
+            src = src.to(torch.device(device))
+            mlm = mlm.to(torch.device(device))
+            mask = mask.to(torch.device(device))
+            nsp = nsp.to(torch.device(device))
             mlm_loss, nsp_loss = calculate_losses(model, src, mlm, mask, nsp)
             MLM_loss += mlm_loss
             NSP_loss += nsp_loss
@@ -487,11 +482,17 @@ def pretrain_model():
     You can modify this function by yourself.
     This function does not affects your final score.
     """
-    train_dataset = ParagraphDataset(os.path.join('data', 'imdb_train.csv'))
-    train_dataset = PretrainDataset(train_dataset)
-    val_dataset = ParagraphDataset(os.path.join('data', 'imdb_val.csv'))
-    val_dataset = PretrainDataset(val_dataset)
-    model = MLMandNSPmodel(train_dataset.token_num).to(device)
+    tokenizer = BertTokenizer(args.vocab_file, max_len=args.max_seq_length)
+    comment_train_dataset = ParagraphDataset(os.path.join('data', 'korean-hate-speech', 'unlabeled'))
+    title_train_dataset = ParagraphDataset(os.path.join('data', 'korean-hate-speech', 'news_title'))
+    train_dataset = PretrainDataset(args.max_seq_length, comment_train_dataset, title_train_dataset, tokenizer)
+    comment_val_dataset = ParagraphDataset(os.path.join('data', 'korean-hate-speech', 'unlabeled', 'dev'))
+    title_val_dataset = ParagraphDataset(os.path.join('data', 'korean-hate-speech', 'news_title', 'dev'))
+    val_dataset = PretrainDataset(args.max_seq_length, comment_val_dataset, title_val_dataset, tokenizer)
+    config = Config(args.config_file)
+    device = torch.device('cpu')
+    model = MlmNspModel(config).to(torch.device(device))
+    model.bert.load_state_dict(torch.load(args.checkpoint, map_location=device))
 
     model_name = 'pretrained'
 
@@ -503,8 +504,8 @@ def pretrain_model():
     with open(model_name+'_result.pkl', 'wb') as f:
         pickle.dump((MLM_train_losses, MLM_val_losses, NSP_train_losses, NSP_val_losses), f)
 
-    utils.plot_values(MLM_train_losses, MLM_val_losses, title=model_name + "_mlm")
-    utils.plot_values(NSP_train_losses, NSP_val_losses, title=model_name + "_nsp")
+    utils_pretrain.plot_values(MLM_train_losses, MLM_val_losses, title=model_name + "_mlm")
+    utils_pretrain.plot_values(NSP_train_losses, NSP_val_losses, title=model_name + "_nsp")
 
     print("Final MLM training loss: {:06.4f}".format(MLM_train_losses[-1]))
     print("Final MLM validation loss: {:06.4f}".format(MLM_val_losses[-1]))
@@ -512,10 +513,101 @@ def pretrain_model():
     print("Final NSP validation loss: {:06.4f}".format(NSP_val_losses[-1]))
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    # Required parameters
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
+    parser.add_argument("--task_name",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The name of the task to train.")
+    parser.add_argument("--config_file",
+                        type=str,
+                        required=True,
+                        help="model configuration file")
+    parser.add_argument("--vocab_file",
+                        type=str,
+                        required=True,
+                        help="tokenizer vocab file")
+    parser.add_argument("--checkpoint",
+                        type=str,
+                        required=True,
+                        help="pretrained model checkpoint")
+    # Other parameters
+    parser.add_argument("--output_dir",
+                        default="output",
+                        type=str,
+                        help="The output directory where the model predictions and checkpoints will be written.")
+    parser.add_argument("--max_seq_length",
+                        default=128,
+                        type=int,
+                        help="The maximum total input sequence length after WordPiece tokenization. \n"
+                             "Sequences longer than this will be truncated, and sequences shorter \n"
+                             "than this will be padded.")
+    parser.add_argument("--do_eval",
+                        action='store_true',
+                        help="Whether to run eval on the dev set.")
+    parser.add_argument("--train_batch_size",
+                        default=16,
+                        type=int,
+                        help="Total batch size for training.")
+    parser.add_argument("--eval_batch_size",
+                        default=32,
+                        type=int,
+                        help="Total batch size for eval.")
+    parser.add_argument("--learning_rate",
+                        default=3e-5,
+                        type=float,
+                        help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs",
+                        default=10.0,
+                        type=float,
+                        help="Total number of training epochs to perform.")
+    parser.add_argument("--warmup_proportion",
+                        default=0.1,
+                        type=float,
+                        help="Proportion of training to perform linear learning rate warmup for. "
+                             "E.g., 0.1 = 10%% of training.")
+    parser.add_argument("--max_grad_norm",
+                        default=1.0,
+                        type=float,
+                        help="Max gradient norm.")
+    parser.add_argument("--no_cuda",
+                        action='store_true',
+                        help="Whether not to use CUDA when available")
+    parser.add_argument("--local_rank",
+                        type=int,
+                        default=-1,
+                        help="local_rank for distributed training on gpus")
+    parser.add_argument('--seed',
+                        type=int,
+                        default=42,
+                        help="random seed for initialization")
+    parser.add_argument('--gradient_accumulation_steps',
+                        type=int,
+                        default=1,
+                        help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument('--fp16',
+                        action='store_true',
+                        help="Whether to use 16-bit float precision instead of 32-bit")
+    parser.add_argument('--fp16_opt_level', type=str, default='O2',
+                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
+                             "See details at https://nvidia.github.io/apex/amp.html")
+    parser.add_argument('--loss_scale',
+                        type=float, default=0,
+                        help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
+                             "0 (default value): dynamic loss scaling.\n"
+                             "Positive power of 2: static loss scaling value.\n")
+    args = parser.parse_args()
+
     torch.set_printoptions(precision=8)
     random.seed(1234)
     torch.manual_seed(1234)
 
-    MLM_and_NSP_dataset_test()
-    loss_calculation_test()
+    # MLM_and_NSP_dataset_test()
+    # loss_calculation_test()
     pretrain_model()

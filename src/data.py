@@ -1,6 +1,6 @@
 # Datasets for your training, DO NOT MODIFY!!!
 # Read the codes carefully to implment your trainers properly.
-import os
+import os, glob
 from typing import List, Union
 from itertools import chain
 import csv
@@ -9,32 +9,37 @@ from bpe import BytePairEncoding
 
 import sentencepiece as spm
 
+
 class ParagraphDataset(object):
     """ Paragraph Dataset
     We use same IMDB datset for pretraining.
     This dataset stores reviews and returns one of them when it called.
     You can use a returned review as a paragraph to sample a sentence.
     """
-    def __init__(self, file_path: str) -> None:
-        self._processor = spm.SentencePieceProcessor()
-        self._processor.load(os.path.join('sentencepiece', 'imdb.model'))
+    def __init__(self, dir_path: str) -> None:
+        # self._processor = spm.SentencePieceProcessor()
+        # self._processor.load(os.path.join('sentencepiece', 'imdb.model'))
 
-        with open(file_path, newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            self._rows = [row[1:] for row in reader]
+        files = glob.glob(os.path.join(dir_path, 'unlabeled_*.txt'))
+        files.sort()
+        self._rows = []
+        for file in files:
+            with open(file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                self._rows += lines
 
     @property
     def token_num(self):
         # The number of tokens. Use this to sample a word
-        return len(self._processor)
+        return 32000
 
     def __len__(self) -> int:
         # The number of the paragraphs
         return len(self._rows)
 
-    def __getitem__(self, index: int) -> List[List[str]]:
+    def __getitem__(self, index: int):
         # Return one of the paragraphs
-        return list(map(self._processor.EncodeAsIds, self._rows[index]))
+        return self._rows[index]
 
 class IMDBdataset(object):
     """  IMDB Review Dataset

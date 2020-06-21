@@ -348,6 +348,29 @@ class Model(nn.Module):
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         return sequence_output, pooled_output
+class GELU(nn.Module):
+    def __init__(self):
+        pass
+    def forward(self, x):
+        return x * 0.5 * (1.0 + torch.erf(x / 1.41421))
+
+class MlmNspModel(nn.Module):
+    def __init__(self, config):
+        super(MlmNspModel, self).__init__()
+        self.bert = Model(config)
+        self.NSP_output = nn.Linear(config.hidden_size, 2)
+        self.MLM_output = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            GELU(),
+            nn.LayerNorm(config.hidden_size),
+            nn.Linear(config.hidden_size, 32000)
+        )
+
+    def forward(self, input_ids, token_type_ids, attention_mask=None):
+        sequence_output, pooled_output = self.bert(input_ids, token_type_ids, attention_mask)
+        mlm_output = self.MLM_output(sequence_output)
+        nsp_output = self.NSP_output(pooled_output)
+        return mlm_output, nsp_output
 
 class SequenceClassificationMultitask(nn.Module):
     def __init__(self, config, num_labels=[2,3,3]):
